@@ -4,6 +4,7 @@
 
 -define(DISK_MSG_TAG, '$disk').
 % -define(PREFIX_DISK_MSG_TAG, '$prefix_disk').
+%%TODO shorten that atom since it gets persisted many times
 -define(PREFIX_MEM_MSG_TAG, '$prefix_inmem').
 
 -define(DISK_MSG(Header), [Header | ?DISK_MSG_TAG]).

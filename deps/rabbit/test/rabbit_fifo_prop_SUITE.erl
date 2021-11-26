@@ -14,6 +14,8 @@
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbit_common/include/rabbit_framing.hrl").
 
+-define(record_info(T,R),lists:zip(record_info(fields,T),tl(tuple_to_list(R)))).
+
 %%%===================================================================
 %%% Common Test callbacks
 %%%===================================================================
@@ -72,7 +74,15 @@ all_tests() ->
      single_active_ordering_03,
      in_memory_limit,
      max_length,
-     dlx_01
+     snapshots_dlx,
+     dlx_01,
+     dlx_02,
+     dlx_03,
+     dlx_04,
+     dlx_05,
+     dlx_06,
+     dlx_07,
+     dlx_08
      % single_active_ordering_02
     ].
 
@@ -790,28 +800,52 @@ snapshots(_Config) ->
                                       oneof([range(1, 10), undefined]),
                                       oneof([range(1, 1000), undefined]),
                                       oneof([drop_head, reject_publish]),
-                                      oneof([undefined,
-                                             {at_most_once, {?MODULE, banana, []}},
-                                             at_least_once])
+                                      oneof([undefined, {at_most_once, {?MODULE, banana, []}}])
                                      }}]),
-                      %% Combination of drop_head and at_least_once is not allowed.
-                      ?IMPLIES(not (Overflow =:= drop_head andalso
-                                    DeadLetterHandler =:= at_least_once),
-                               begin
-                                   Config = config(?FUNCTION_NAME,
-                                                   Length,
-                                                   Bytes,
-                                                   SingleActiveConsumer,
-                                                   DeliveryLimit,
-                                                   InMemoryLength,
-                                                   InMemoryBytes,
-                                                   Overflow,
-                                                   DeadLetterHandler),
-                                   ?FORALL(O, ?LET(Ops, log_gen(256), expand(Ops, Config)),
-                                           collect({log_size, length(O)},
-                                                   snapshots_prop(Config, O)))
-                               end))
-      end, [], 2500).
+                      begin
+                          Config = config(?FUNCTION_NAME,
+                                          Length,
+                                          Bytes,
+                                          SingleActiveConsumer,
+                                          DeliveryLimit,
+                                          InMemoryLength,
+                                          InMemoryBytes,
+                                          Overflow,
+                                          DeadLetterHandler),
+                          ?FORALL(O, ?LET(Ops, log_gen(256), expand(Ops, Config)),
+                                  collect({log_size, length(O)},
+                                          snapshots_prop(Config, O)))
+                      end)
+      end, [], 1000).
+
+snapshots_dlx(_Config) ->
+    run_proper(
+      fun () ->
+              ?FORALL({Length, Bytes, SingleActiveConsumer,
+                       DeliveryLimit, InMemoryLength, InMemoryBytes},
+                      frequency([{10, {0, 0, false, 0, 0, 0}},
+                                 {5, {oneof([range(1, 10), undefined]),
+                                      oneof([range(1, 1000), undefined]),
+                                      boolean(),
+                                      oneof([range(1, 3), undefined]),
+                                      oneof([range(1, 10), undefined]),
+                                      oneof([range(1, 1000), undefined])
+                                     }}]),
+                      begin
+                          Config = config(?FUNCTION_NAME,
+                                          Length,
+                                          Bytes,
+                                          SingleActiveConsumer,
+                                          DeliveryLimit,
+                                          InMemoryLength,
+                                          InMemoryBytes,
+                                          reject_publish,
+                                          at_least_once),
+                          ?FORALL(O, ?LET(Ops, log_gen_dlx(256), expand(Ops, Config)),
+                                  collect({log_size, length(O)},
+                                          snapshots_prop(Config, O)))
+                      end)
+      end, [], 1000).
 
 single_active(_Config) ->
     Size = 300,
@@ -1040,6 +1074,7 @@ max_length(_Config) ->
                       end)
       end, [], Size).
 
+%% Test that rabbit_fifo_dlx can check out a prefix message.
 dlx_01(_Config) ->
     C1Pid = c:pid(0,883,1),
     C1 = {<<>>, C1Pid},
@@ -1055,6 +1090,203 @@ dlx_01(_Config) ->
                 rabbit_fifo_dlx:make_settle([1])
                ],
     Config = config(?FUNCTION_NAME, 8, undefined, false, 2, 5, 100, reject_publish, at_least_once),
+    ?assert(snapshots_prop(Config, Commands)),
+    ok.
+
+%% Test that dehydrating dlx_consumer works.
+dlx_02(_Config) ->
+    C1Pid = c:pid(0,883,1),
+    C1 = {<<>>, C1Pid},
+    E = c:pid(0,176,1),
+    Commands = [
+                rabbit_fifo_dlx:make_checkout(my_dlx_worker, 1),
+                make_checkout(C1, {auto,1,simple_prefetch}),
+                make_enqueue(E,1,msg(<<"1">>)),
+                %% State contains release cursor A.
+                rabbit_fifo:make_discard(C1, [0]),
+                make_enqueue(E,2,msg(<<"2">>)),
+                %% State contains release cursor B
+                %% with the 1st msg being checked out to dlx_consumer and
+                %% being dehydrated.
+                rabbit_fifo_dlx:make_settle([0])
+                %% Release cursor A got emitted.
+               ],
+    Config = config(?FUNCTION_NAME, 10, undefined, false, 5, 5, 100, reject_publish, at_least_once),
+    ?assert(snapshots_prop(Config, Commands)),
+    ok.
+
+%% Test that dehydrating discards queue works.
+dlx_03(_Config) ->
+    C1Pid = c:pid(0,883,1),
+    C1 = {<<>>, C1Pid},
+    E = c:pid(0,176,1),
+    Commands = [
+                make_enqueue(E,1,msg(<<"1">>)),
+                %% State contains release cursor A.
+                make_checkout(C1, {auto,1,simple_prefetch}),
+                rabbit_fifo:make_discard(C1, [0]),
+                make_enqueue(E,2,msg(<<"2">>)),
+                %% State contains release cursor B.
+                %% 1st message sitting in discards queue got dehydrated.
+                rabbit_fifo_dlx:make_checkout(my_dlx_worker, 1),
+                rabbit_fifo_dlx:make_settle([0])
+                %% Release cursor A got emitted.
+               ],
+    Config = config(?FUNCTION_NAME, 10, undefined, false, 5, 5, 100, reject_publish, at_least_once),
+    ?assert(snapshots_prop(Config, Commands)),
+    ok.
+
+dlx_04(_Config) ->
+    C1Pid = c:pid(0,883,1),
+    C1 = {<<>>, C1Pid},
+    E = c:pid(0,176,1),
+    Commands = [
+                rabbit_fifo_dlx:make_checkout(my_dlx_worker, 3),
+                make_enqueue(E,1,msg(<<>>)),
+                make_enqueue(E,2,msg(<<>>)),
+                make_enqueue(E,3,msg(<<>>)),
+                make_enqueue(E,4,msg(<<>>)),
+                make_enqueue(E,5,msg(<<>>)),
+                make_enqueue(E,6,msg(<<>>)),
+                make_checkout(C1, {auto,6,simple_prefetch}),
+                rabbit_fifo:make_discard(C1, [0,1,2,3,4,5]),
+                rabbit_fifo_dlx:make_settle([0,1,2])
+               ],
+    Config = config(?FUNCTION_NAME, undefined, undefined, true, 1, 5, 136, reject_publish, at_least_once),
+    ?assert(snapshots_prop(Config, Commands)),
+    ok.
+
+%% Test that discards queue gets dehydrated with 1 message that has empty message body.
+dlx_05(_Config) ->
+    C1Pid = c:pid(0,883,1),
+    C1 = {<<>>, C1Pid},
+    E = c:pid(0,176,1),
+    Commands = [
+                make_enqueue(E,1,msg(<<>>)),
+                make_enqueue(E,2,msg(<<"msg2">>)),
+                %% 0,1 in messages
+                make_checkout(C1, {auto,1,simple_prefetch}),
+                rabbit_fifo:make_discard(C1, [0]),
+                %% 0 in discards, 1 in checkout
+                make_enqueue(E,3,msg(<<"msg3">>)),
+                %% 0 in discards (rabbit_fifo_dlx msg_bytes is still 0 because body of msg 0 is empty),
+                %% 1 in checkout, 2 in messages
+                rabbit_fifo_dlx:make_checkout(my_dlx_worker, 1),
+                %% 0 in dlx_checkout, 1 in checkout, 2 in messages
+                make_settle(C1, [1]),
+                %% 0 in dlx_checkout, 2 in checkout
+                rabbit_fifo_dlx:make_settle([0])
+                %% 2 in checkout
+               ],
+    Config = config(?FUNCTION_NAME, 0, 0, false, 0, 0, 0, reject_publish, at_least_once),
+    ?assert(snapshots_prop(Config, Commands)),
+    ok.
+
+% Test that after recovery we can differentiate between index messge and (prefix) disk message
+dlx_06(_Config) ->
+    C1Pid = c:pid(0,883,1),
+    C1 = {<<>>, C1Pid},
+    E = c:pid(0,176,1),
+    Commands = [
+                make_enqueue(E,1,msg(<<>>)),
+                %% The following message has 3 bytes.
+                %% If we cannot differentiate between disk message and prefix disk message,
+                %% rabbit_fifo:delete_indexes/2 will not know whether it's a disk message or
+                %% prefix disk message and it will therefore falsely think that 3 is an index
+                %% instead of a size header resulting in message 3 being deleted from the index
+                %% after recovery.
+                make_enqueue(E,2,msg(<<"111">>)),
+                make_enqueue(E,3,msg(<<>>)),
+                %% 0,1,2 in messages
+                rabbit_fifo_dlx:make_checkout(my_dlx_worker, 2),
+                make_checkout(C1, {auto,3,simple_prefetch}),
+                %% 0,1,2 in checkout
+                rabbit_fifo:make_discard(C1, [0,1,2]),
+                %% 0,1 in dlx_checkout, 3 in discards
+                rabbit_fifo_dlx:make_settle([0,1])
+                %% 3 in dlx_checkout
+               ],
+    Config = config(?FUNCTION_NAME, undefined, 749, false, 1, 1, 131, reject_publish, at_least_once),
+    ?assert(snapshots_prop(Config, Commands)),
+    ok.
+
+dlx_07(_Config) ->
+    C1Pid = c:pid(0,883,1),
+    C1 = {<<>>, C1Pid},
+    E = c:pid(0,176,1),
+    Commands = [
+                make_checkout(C1, {auto,1,simple_prefetch}),
+                make_enqueue(E,1,msg(<<"12">>)),
+                %% 0 in checkout
+                rabbit_fifo:make_discard(C1, [0]),
+                %% 0 in discard
+                make_enqueue(E,2,msg(<<"1234567">>)),
+                %% 0 in discard, 1 in checkout
+                rabbit_fifo:make_discard(C1, [1]),
+                %% 0, 1 in discard
+                rabbit_fifo_dlx:make_checkout(my_dlx_worker, 1),
+                %% 0 in dlx_checkout, 1 in discard
+                make_enqueue(E,3,msg(<<"123">>)),
+                %% 0 in dlx_checkout, 1 in discard, 2 in checkout
+                rabbit_fifo_dlx:make_checkout(my_dlx_worker, 2),
+                %% 0,1 in dlx_checkout, 2 in checkout
+                rabbit_fifo_dlx:make_settle([0]),
+                %% 1 in dlx_checkout, 2 in checkout
+                make_settle(C1, [2]),
+                %% 1 in dlx_checkout
+                make_enqueue(E,4,msg(<<>>)),
+                %% 1 in dlx_checkout, 3 in checkout
+                rabbit_fifo_dlx:make_settle([0,1])
+                %% 3 in checkout
+               ],
+    Config = config(?FUNCTION_NAME, undefined, undefined, false, undefined, undefined, undefined,
+                    reject_publish, at_least_once),
+    ?assert(snapshots_prop(Config, Commands)),
+    ok.
+
+%% This test fails if discards queue is not normalized for comparison.
+dlx_08(_Config) ->
+    C1Pid = c:pid(0,883,1),
+    C1 = {<<>>, C1Pid},
+    E = c:pid(0,176,1),
+    Commands = [
+                make_enqueue(E,1,msg(<<>>)),
+                %% 0 in messages
+                make_checkout(C1, {auto,1,simple_prefetch}),
+                %% 0 in checkout
+                make_enqueue(E,2,msg(<<>>)),
+                %% 1 in messages, 0 in checkout
+                rabbit_fifo:make_discard(C1, [0]),
+                %% 1 in checkout, 0 in discards
+                make_enqueue(E,3,msg(<<>>)),
+                %% 2 in messages, 1 in checkout, 0 in discards
+                rabbit_fifo:make_discard(C1, [1]),
+                %% 2 in checkout, 0,1 in discards
+                rabbit_fifo:make_discard(C1, [2]),
+                %% 0,1,2 in discards
+                make_enqueue(E,4,msg(<<>>)),
+                %% 3 in checkout, 0,1,2 in discards
+                %% last command emitted this release cursor
+                make_settle(C1, [3]),
+                make_enqueue(E,5,msg(<<>>)),
+                make_enqueue(E,6,msg(<<>>)),
+                rabbit_fifo:make_discard(C1, [4]),
+                rabbit_fifo:make_discard(C1, [5]),
+                make_enqueue(E,7,msg(<<>>)),
+                make_enqueue(E,8,msg(<<>>)),
+                make_enqueue(E,9,msg(<<>>)),
+                rabbit_fifo:make_discard(C1, [6]),
+                rabbit_fifo:make_discard(C1, [7]),
+                rabbit_fifo_dlx:make_checkout(my_dlx_worker, 1),
+                make_enqueue(E,10,msg(<<>>)),
+                rabbit_fifo:make_discard(C1, [8]),
+                rabbit_fifo_dlx:make_settle([0]),
+                rabbit_fifo:make_discard(C1, [9]),
+                rabbit_fifo_dlx:make_settle([1]),
+                rabbit_fifo_dlx:make_settle([2])
+               ],
+    Config = config(?FUNCTION_NAME, undefined, undefined, false, undefined, undefined, undefined,
+                    reject_publish, at_least_once),
     ?assert(snapshots_prop(Config, Commands)),
     ok.
 
@@ -1293,9 +1525,6 @@ snapshots_prop(Conf, Commands) ->
     end.
 
 log_gen(Size) ->
-    log_gen(Size, binary()).
-
-log_gen(Size, _Body) ->
     Nodes = [node(),
              fakenode@fake,
              fakenode@fake2
@@ -1317,6 +1546,35 @@ log_gen(Size, _Body) ->
                           {1, nodeup_gen(Nodes)},
                           {1, purge}
                          ]))))).
+
+log_gen_dlx(Size) ->
+    Nodes = [node(),
+             fakenode@fake,
+             fakenode@fake2
+            ],
+    ?LET(EPids, vector(2, pid_gen(Nodes)),
+         ?LET(CPids, vector(2, pid_gen(Nodes)),
+              resize(Size,
+                     list(
+                       frequency(
+                         [{20, enqueue_gen(oneof(EPids))},
+                          {40, {input_event,
+                                frequency([{1, settle},
+                                           {1, return},
+                                           %% dead-letter many messages
+                                           {5, discard},
+                                           {1, requeue}])}},
+                          {2, checkout_gen(oneof(CPids))},
+                          {1, checkout_cancel_gen(oneof(CPids))},
+                          {1, down_gen(oneof(EPids ++ CPids))},
+                          {1, nodeup_gen(Nodes)},
+                          {1, purge},
+                          %% same dlx_worker can subscribe multiple times,
+                          %% e.g. after it dlx_worker crashed
+                          %% "last subscriber wins"
+                          {2, {checkout_dlx, choose(1,10)}}
+                         ]))))).
+
 
 log_gen_config(Size) ->
     Nodes = [node(),
@@ -1411,11 +1669,7 @@ checkout_gen(Pid) ->
     %% pid, tag, prefetch
     ?LET(C, {checkout, {binary(), Pid}, choose(1, 100)}, C).
 
-
--record(t, {state = rabbit_fifo:init(#{name => proper,
-                                       queue_resource => blah,
-                                       release_cursor_interval => 1})
-                :: rabbit_fifo:state(),
+-record(t, {state :: rabbit_fifo:state(),
             index = 1 :: non_neg_integer(), %% raft index
             enqueuers = #{} :: #{pid() => term()},
             consumers = #{} :: #{{binary(), pid()} => term()},
@@ -1430,19 +1684,33 @@ checkout_gen(Pid) ->
 expand(Ops, Config) ->
     expand(Ops, Config, {undefined, fun ra_lib:id/1}).
 
+%% generates a sequence of Raft commands
 expand(Ops, Config, EnqFun) ->
     %% execute each command against a rabbit_fifo state and capture all relevant
     %% effects
-    T = #t{enq_body_fun = EnqFun,
+    InitConfig0 = #{name => proper,
+                    queue_resource => blah,
+                    release_cursor_interval => 1},
+    InitConfig = case Config of
+                     #{dead_letter_handler := at_least_once} ->
+                         %% Configure rabbit_fifo config with at_least_once so that
+                         %% rabbit_fifo_dlx outputs dlx_delivery effects
+                         %% which we are going to settle immediately in enq_effs/2.
+                         %% Therefore the final generated Raft commands will include
+                         %% {dlx, {checkout, ...}} and {dlx, {settle, ...}} Raft commands.
+                         maps:put(dead_letter_handler, at_least_once, InitConfig0);
+                     _ ->
+                         InitConfig0
+                 end,
+    T = #t{state = rabbit_fifo:init(InitConfig),
+           enq_body_fun = EnqFun,
            config = Config},
     #t{effects = Effs} = T1 = lists:foldl(fun handle_op/2, T, Ops),
     %% process the remaining effect
     #t{log = Log} = lists:foldl(fun do_apply/2,
                                 T1#t{effects = queue:new()},
                                 queue:to_list(Effs)),
-
     lists:reverse(Log).
-
 
 handle_op({enqueue, Pid, When, Data},
           #t{enqueuers = Enqs0,
@@ -1520,7 +1788,7 @@ handle_op({input_event, requeue}, #t{effects = Effs} = T) ->
 handle_op({input_event, Settlement}, #t{effects = Effs,
                                         down = Down} = T) ->
     case queue:out(Effs) of
-        {{value, {settle, MsgIds, CId}}, Q} ->
+        {{value, {settle, CId, MsgIds}}, Q} ->
             Cmd = case Settlement of
                       settle -> rabbit_fifo:make_settle(CId, MsgIds);
                       return -> rabbit_fifo:make_return(CId, MsgIds);
@@ -1536,6 +1804,9 @@ handle_op({input_event, Settlement}, #t{effects = Effs,
                 false ->
                     do_apply(Cmd, T#t{effects = Q})
             end;
+        {{value, {dlx, {settle, MsgIds}}}, Q} ->
+            Cmd = rabbit_fifo_dlx:make_settle(MsgIds),
+            do_apply(Cmd, T#t{effects = Q});
         _ ->
             T
     end;
@@ -1543,7 +1814,10 @@ handle_op(purge, T) ->
     do_apply(rabbit_fifo:make_purge(), T);
 handle_op({update_config, Changes}, #t{config = Conf} = T) ->
     Config = maps:merge(Conf, Changes),
-    do_apply(rabbit_fifo:make_update_config(Config), T).
+    do_apply(rabbit_fifo:make_update_config(Config), T);
+handle_op({checkout_dlx, Prefetch}, #t{config = #{dead_letter_handler := at_least_once}} = T) ->
+    Cmd = rabbit_fifo_dlx:make_checkout(proper_dlx_worker, Prefetch),
+    do_apply(Cmd, T).
 
 
 do_apply(Cmd, #t{effects = Effs,
@@ -1571,11 +1845,15 @@ do_apply(Cmd, #t{effects = Effs,
     end.
 
 enq_effs([], Q) -> Q;
-enq_effs([{send_msg, P, {delivery, CTag, Msgs}, ra_event} | Rem], Q) ->
+enq_effs([{send_msg, P, {delivery, CTag, Msgs}, _Opts} | Rem], Q) ->
     MsgIds = [I || {I, _} <- Msgs],
     %% always make settle commands by default
     %% they can be changed depending on the input event later
     Cmd = rabbit_fifo:make_settle({CTag, P}, MsgIds),
+    enq_effs(Rem, queue:in(Cmd, Q));
+enq_effs([{send_msg, _, {dlx_delivery, Msgs}, _Opts} | Rem], Q) ->
+    MsgIds = [I || {I, _} <- Msgs],
+    Cmd = rabbit_fifo_dlx:make_settle(MsgIds),
     enq_effs(Rem, queue:in(Cmd, Q));
 enq_effs([_ | Rem], Q) ->
     enq_effs(Rem, Q).
@@ -1627,10 +1905,12 @@ run_snapshot_test0(Conf, Commands, Invariant) ->
              State -> ok;
              _ ->
                  ct:pal("Snapshot tests failed run log:~n"
-                        "~p~n from ~n~p~n Entries~n~p~n"
+                        "~p~n from snapshot index ~b "
+                        "with snapshot state~n~p~n Entries~n~p~n"
                         "Config: ~p~n",
-                        [Filtered, SnapState, Entries, Conf]),
-                 ct:pal("Expected~n~p~nGot:~n~p", [State, S]),
+                        [Filtered, SnapIdx, SnapState, Entries, Conf]),
+                 ct:pal("Expected~n~p~nGot:~n~p~n", [?record_info(rabbit_fifo, State),
+                                                     ?record_info(rabbit_fifo, S)]),
                  ?assertEqual(State, S)
          end
      end || {release_cursor, SnapIdx, SnapState} <- Cursors],

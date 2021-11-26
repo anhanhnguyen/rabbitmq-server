@@ -1,5 +1,10 @@
+-define(NIL, []).
+
 %% At-least-once dead-lettering does not support reason 'maxlen'.
--type reason() :: 'expired' | 'rejected' | delivery_limit.
+%% Reason of prefix messages is [] because the message will not be
+%% actually delivered and storing 2 bytes in the persisted snapshot
+%% is less than the reason atom.
+-type reason() :: 'expired' | 'rejected' | delivery_limit | ?NIL.
 
 %%TODO Add logic to rabbit_fifo_dlx to dehydrate the state.
 % See snapshot scenarios in rabbit_fifo_prop_SUITE. Add dlx dehydrate tests.

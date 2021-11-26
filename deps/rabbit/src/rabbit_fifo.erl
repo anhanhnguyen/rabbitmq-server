@@ -53,6 +53,7 @@
 
          %% misc
          dehydrate_state/1,
+         dehydrate_message/1,
          normalize/1,
          get_msg_header/1,
          get_header/2,
@@ -622,14 +623,13 @@ apply(#{index := IncomingRaftIdx} = Meta, {dlx, Cmd},
                             ra_indexes = Indexes},
     {State, ok, Effects} = checkout(Meta, State0, State1, [], false),
     update_smallest_raft_index(IncomingRaftIdx, State, Effects);
-apply(#{index := IncomingRaftIdx} = Meta, {dlx, Cmd},
+apply(Meta, {dlx, Cmd},
       #?MODULE{dlx = DlxState0} = State0) ->
     {DlxState, ok} = rabbit_fifo_dlx:apply(Cmd, DlxState0),
     State1 = State0#?MODULE{dlx = DlxState},
     %% Run a checkout so that a new DLX consumer will be delivered discarded messages
     %% directly after it subscribes.
-    {State, ok, Effects} = checkout(Meta, State0, State1, [], false),
-    update_smallest_raft_index(IncomingRaftIdx, State, Effects);
+    checkout(Meta, State0, State1, [], false);
 apply(_Meta, Cmd, State) ->
     %% handle unhandled commands gracefully
     rabbit_log:debug("rabbit_fifo: unhandled command ~W", [Cmd, 10]),
@@ -1601,7 +1601,7 @@ complete(Meta, ConsumerId, DiscardedMsgIds,
 
 delete_indexes(Msgs, Indexes) ->
     %% TODO: optimise by passing a list to rabbit_fifo_index
-    lists:foldl(fun (?INDEX_MSG(I, _), Acc) when is_integer(I) ->
+    lists:foldl(fun (?INDEX_MSG(I, ?MSG(_,_)), Acc) when is_integer(I) ->
                         rabbit_fifo_index:delete(I, Acc);
                     (_, Acc) ->
                         Acc
@@ -2112,7 +2112,8 @@ expire_msgs(RaCmdTs, State0, Effects0) ->
                     Indexes = rabbit_fifo_index:delete(Idx, Indexes0),
                     State3 = decr_total(State2),
                     State4 = case Msg of
-                                 ?DISK_MSG(_) -> State3;
+                                 ?DISK_MSG(_) ->
+                                     State3;
                                  _ ->
                                      subtract_in_memory_counts(Header, State3)
                              end,
@@ -2257,22 +2258,23 @@ maybe_queue_consumer(ConsumerId, #consumer{credit = Credit} = Con,
 
 %% creates a dehydrated version of the current state to be cached and
 %% potentially used to for a snaphot at a later point
-dehydrate_state(#?MODULE{msg_bytes_in_memory = 0,
-                         cfg = #cfg{max_length = 0},
-                         consumers = Consumers} = State) ->
+% dehydrate_state(#?MODULE{msg_bytes_in_memory = 0,
+                         % cfg = #cfg{max_length = 0},
+                         % consumers = Consumers} = State) ->
     %% no messages are kept in memory, no need to
     %% overly mutate the current state apart from removing indexes and cursors
-    State#?MODULE{
-                  ra_indexes = rabbit_fifo_index:empty(),
-                  consumers = maps:map(fun (_, C) ->
-                                               dehydrate_consumer(C)
-                                       end, Consumers),
-                  release_cursors = lqueue:new()};
+    % State#?MODULE{
+                  % ra_indexes = rabbit_fifo_index:empty(),
+                  % consumers = maps:map(fun (_, C) ->
+                                               % dehydrate_consumer(C)
+                                       % end, Consumers),
+                  % release_cursors = lqueue:new()};
 dehydrate_state(#?MODULE{messages = Messages,
                          consumers = Consumers,
                          returns = Returns,
                          prefix_msgs = {PRCnt, PrefRet0, PPCnt, PrefMsg0},
-                         waiting_consumers = Waiting0} = State) ->
+                         waiting_consumers = Waiting0,
+                         dlx = DlxState} = State) ->
     RCnt = lqueue:len(Returns),
     %% TODO: optimise this function as far as possible
     PrefRet1 = lists:foldr(fun (M, Acc) ->
@@ -2293,7 +2295,8 @@ dehydrate_state(#?MODULE{messages = Messages,
                   returns = lqueue:new(),
                   prefix_msgs = {PRCnt + RCnt, PrefRet,
                                  PPCnt + lqueue:len(Messages), PrefMsgs},
-                  waiting_consumers = Waiting}.
+                  waiting_consumers = Waiting,
+                  dlx = rabbit_fifo_dlx:dehydrate(DlxState)}.
 
 dehydrate_messages(Msgs0)  ->
     {OutRes, Msgs} = lqueue:out(Msgs0),
@@ -2315,7 +2318,8 @@ dehydrate_message(?PREFIX_MEM_MSG(_) = M) ->
 dehydrate_message(?DISK_MSG(_) = M) ->
     M;
 dehydrate_message(?INDEX_MSG(_Idx, ?DISK_MSG(_Header) = Msg)) ->
-    %% use disk msgs directly as prefix messages
+    %% Use disk msgs directly as prefix messages.
+    %% This avoids memory allocation since we do not convert.
     Msg;
 dehydrate_message(?INDEX_MSG(Idx, ?MSG(Header, _))) when is_integer(Idx) ->
     ?PREFIX_MEM_MSG(Header).
@@ -2324,11 +2328,13 @@ dehydrate_message(?INDEX_MSG(Idx, ?MSG(Header, _))) when is_integer(Idx) ->
 normalize(#?MODULE{ra_indexes = _Indexes,
                    returns = Returns,
                    messages = Messages,
-                   release_cursors = Cursors} = State) ->
+                   release_cursors = Cursors,
+                   dlx = DlxState} = State) ->
     State#?MODULE{
              returns = lqueue:from_list(lqueue:to_list(Returns)),
              messages = lqueue:from_list(lqueue:to_list(Messages)),
-             release_cursors = lqueue:from_list(lqueue:to_list(Cursors))}.
+             release_cursors = lqueue:from_list(lqueue:to_list(Cursors)),
+             dlx = rabbit_fifo_dlx:normalize(DlxState)}.
 
 is_over_limit(#?MODULE{cfg = #cfg{max_length = undefined,
                                   max_bytes = undefined}}) ->

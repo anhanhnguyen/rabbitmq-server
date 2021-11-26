@@ -11,7 +11,7 @@
 -export([init/0, apply/2, discard/3, overview/1,
          checkout/1, state_enter/4,
          start_worker/2, terminate_worker/1, cleanup/1,
-         consumer_pid/1]).
+         consumer_pid/1, dehydrate/1, normalize/1]).
 
 %% This module handles the dead letter (DLX) part of the rabbit_fifo state machine.
 %% This is a separate module to better unit test and provide separation of concerns.
@@ -47,14 +47,14 @@ make_settle(MessageIds) when is_list(MessageIds) ->
     {dlx, #settle{msg_ids = MessageIds}}.
 
 overview(#?MODULE{consumer = undefined,
-                msg_bytes = MsgBytes,
-                msg_bytes_checkout = 0,
-                discards = Discards}) ->
+                  msg_bytes = MsgBytes,
+                  msg_bytes_checkout = 0,
+                  discards = Discards}) ->
     overview0(Discards, #{}, MsgBytes, 0);
 overview(#?MODULE{consumer = #dlx_consumer{checked_out = Checked},
-                msg_bytes = MsgBytes,
-                msg_bytes_checkout = MsgBytesCheckout,
-                discards = Discards}) ->
+                  msg_bytes = MsgBytes,
+                  msg_bytes_checkout = MsgBytesCheckout,
+                  discards = Discards}) ->
     overview0(Discards, Checked, MsgBytes, MsgBytesCheckout).
 
 overview0(Discards, Checked, MsgBytes, MsgBytesCheckout) ->
@@ -67,14 +67,14 @@ apply(#checkout{consumer = RegName,
                 prefetch = Prefetch},
       #?MODULE{consumer = undefined} = State0) ->
     State = State0#?MODULE{consumer = #dlx_consumer{registered_name = RegName,
-                                                  prefetch = Prefetch}},
+                                                    prefetch = Prefetch}},
     {State, ok};
 apply(#checkout{consumer = RegName,
                 prefetch = Prefetch},
       #?MODULE{consumer = #dlx_consumer{checked_out = CheckedOutOldConsumer},
-             discards = Discards0,
-             msg_bytes = Bytes,
-             msg_bytes_checkout = BytesCheckout} = State0) ->
+               discards = Discards0,
+               msg_bytes = Bytes,
+               msg_bytes_checkout = BytesCheckout} = State0) ->
     %% Since we allow only a single consumer, the new consumer replaces the old consumer.
     %% All checked out messages to the old consumer need to be returned to the discards queue
     %% such that these messages can be (eventually) re-delivered to the new consumer.
@@ -86,14 +86,14 @@ apply(#checkout{consumer = RegName,
                                                  {lqueue:in_r(Msg, D), B + size_in_bytes(IdxMsg)}
                                          end, {Discards0, 0}, Checked1),
     State = State0#?MODULE{consumer = #dlx_consumer{registered_name = RegName,
-                                                  prefetch = Prefetch},
-                         discards = Discards,
-                         msg_bytes = Bytes + BytesMoved,
-                         msg_bytes_checkout = BytesCheckout - BytesMoved},
+                                                    prefetch = Prefetch},
+                           discards = Discards,
+                           msg_bytes = Bytes + BytesMoved,
+                           msg_bytes_checkout = BytesCheckout - BytesMoved},
     {State, ok};
 apply(#settle{msg_ids = MsgIds},
       #?MODULE{consumer = #dlx_consumer{checked_out = Checked} = C,
-             msg_bytes_checkout = BytesCheckout} = State0) ->
+               msg_bytes_checkout = BytesCheckout} = State0) ->
     Acked = maps:with(MsgIds, Checked),
     AckedRsnMsgs = maps:values(Acked),
     AckedMsgs = lists:map(fun({_Reason, Msg}) -> Msg end, AckedRsnMsgs),
@@ -102,18 +102,20 @@ apply(#settle{msg_ids = MsgIds},
                              end, 0, AckedMsgs),
     Unacked = maps:without(MsgIds, Checked),
     State = State0#?MODULE{consumer = C#dlx_consumer{checked_out = Unacked},
-                         msg_bytes_checkout = BytesCheckout - AckedBytes},
+                           msg_bytes_checkout = BytesCheckout - AckedBytes},
     {State, AckedMsgs}.
 
+%%TODO delete delivery_count header to save space?
+%% It's not needed anymore.
 discard(Msg, Reason, #?MODULE{discards = Discards0,
-                            msg_bytes = MsgBytes0} = State) ->
+                              msg_bytes = MsgBytes0} = State) ->
     Discards = lqueue:in({Reason, Msg}, Discards0),
     MsgBytes = MsgBytes0 + size_in_bytes(Msg),
     State#?MODULE{discards = Discards,
-                msg_bytes = MsgBytes}.
+                  msg_bytes = MsgBytes}.
 
 checkout(#?MODULE{consumer = undefined,
-                discards = Discards} = State) ->
+                  discards = Discards} = State) ->
     case lqueue:is_empty(Discards) of
         true ->
             ok;
@@ -135,7 +137,7 @@ checkout0({success, MsgId, {Reason, ?INDEX_MSG(Idx, ?MSG(Header, Msg))}, State},
 checkout0({success, _MsgId, {_Reason, ?TUPLE(_, _)}, State}, SendAcc) ->
     %% This is a prefix message which means we are recovering from a snapshot.
     %% We know:
-    %% 1. This messasge was already delivered in the past, and
+    %% 1. This message was already delivered in the past, and
     %% 2. The recovery Raft log ahead of this Raft command will defintely settle this message.
     %% Therefore, here, we just check this message out to the consumer but do not re-deliver this message
     %% so that we will end up with the correct and deterministic state once the whole recovery log replay is completed.
@@ -145,7 +147,7 @@ checkout0(#?MODULE{consumer = #dlx_consumer{registered_name = RegName}} = State,
     {State, Effects}.
 
 checkout_one(#?MODULE{consumer = #dlx_consumer{checked_out = Checked,
-                                             prefetch = Prefetch}} = State) when map_size(Checked) >= Prefetch ->
+                                               prefetch = Prefetch}} = State) when map_size(Checked) >= Prefetch ->
     State;
 checkout_one(#?MODULE{consumer = #dlx_consumer{checked_out = Checked0,
                                                next_msg_id = Next} = Con0} = State0) ->
@@ -170,9 +172,9 @@ take_next_msg(#?MODULE{discards = Discards0} = State) ->
     end.
 
 add_bytes_checkout(Size, #?MODULE{msg_bytes = Bytes,
-                                msg_bytes_checkout = BytesCheckout} = State) ->
+                                  msg_bytes_checkout = BytesCheckout} = State) ->
     State#?MODULE{msg_bytes = Bytes - Size,
-                msg_bytes_checkout = BytesCheckout + Size}.
+                  msg_bytes_checkout = BytesCheckout + Size}.
 
 size_in_bytes(Msg) ->
     Header = rabbit_fifo:get_msg_header(Msg),
@@ -198,8 +200,9 @@ delivery_effects(CPid, {InMemMsgs, IdxMsgs0}) ->
                              lists:sort(InMemMsgs ++ Msgs0)
                      end,
               [{send_msg, CPid, {dlx_delivery, Msgs}, [ra_event]}]
-      end,
-      {local, node(CPid)}}].
+      end}].
+      %%TODO rabbit_fifo_prop_SUITE:dlx_04 fails with below line
+      % {local, node(CPid)}}].
 
 state_enter(leader, QRef, QName, _State) ->
     start_worker(QRef, QName);
@@ -247,7 +250,7 @@ consumer_pid(_) ->
 
 %% called when switching from at-least-once to at-most-once
 cleanup(#?MODULE{consumer = Consumer,
-               discards = Discards} = State) ->
+                 discards = Discards} = State) ->
     terminate_worker(State),
     %% Return messages in the order they got discarded originally
     %% for the final at-most-once dead-lettering.
@@ -262,3 +265,26 @@ cleanup(#?MODULE{consumer = Consumer,
                         end,
     DiscardReasonMsgs = lqueue:to_list(Discards),
     CheckedReasonMsgs ++ DiscardReasonMsgs.
+
+dehydrate(#?MODULE{discards = Discards,
+                   consumer = Con} = State) ->
+    State#?MODULE{discards = dehydrate_messages(Discards),
+                  consumer = dehydrate_consumer(Con)}.
+
+dehydrate_messages(Discards) ->
+    L0 = lqueue:to_list(Discards),
+    L1 = lists:map(fun({_Reason, Msg}) ->
+                           {?NIL, rabbit_fifo:dehydrate_message(Msg)}
+                   end, L0),
+    lqueue:from_list(L1).
+
+dehydrate_consumer(#dlx_consumer{checked_out = Checked0} = Con) ->
+    Checked = maps:map(fun (_, {_, Msg}) ->
+                               {?NIL, rabbit_fifo:dehydrate_message(Msg)}
+                       end, Checked0),
+    Con#dlx_consumer{checked_out = Checked};
+dehydrate_consumer(undefined) ->
+    undefined.
+
+normalize(#?MODULE{discards = Discards} = State) ->
+    State#?MODULE{discards = lqueue:from_list(lqueue:to_list(Discards))}.
