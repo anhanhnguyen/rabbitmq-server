@@ -684,6 +684,7 @@ convert_v1_to_v2(V1State) ->
                max_in_memory_bytes = rabbit_fifo_v1:get_cfg_field(max_in_memory_bytes, V1State),
                expires = rabbit_fifo_v1:get_cfg_field(expires, V1State)
               },
+
     #?MODULE{
         cfg = Cfg,
         messages = MessagesV2,
@@ -713,16 +714,8 @@ purge_node(Meta, Node, State, Effects) ->
 %% any downs that re not noconnection
 handle_down(Meta, Pid, #?MODULE{consumers = Cons0,
                                 enqueuers = Enqs0} = State0) ->
-    % Remove any enqueuer for the same pid and enqueue any pending messages
-    % This should be ok as we won't see any more enqueues from this pid
-    State1 = case maps:take(Pid, Enqs0) of
-                 {#enqueuer{pending = Pend}, Enqs} ->
-                     lists:foldl(fun ({_, RIdx, RawMsg}, S) ->
-                                         enqueue(RIdx, RawMsg, S)
-                                 end, State0#?MODULE{enqueuers = Enqs}, Pend);
-                 error ->
-                     State0
-             end,
+    % Remove any enqueuer for the down pid
+    State1 = State0#?MODULE{enqueuers = maps:remove(Pid, Enqs0)},
     {Effects1, State2} = handle_waiting_consumer_down(Pid, State1),
     % return checked out messages to main queue
     % Find the consumers for the down pid
@@ -1343,6 +1336,8 @@ apply_enqueue(#{index := RaftIdx} = Meta, From, Seq, RawMsg, State0) ->
             State2 = incr_enqueue_count(incr_total(State1)),
             {State, ok, Effects} = checkout(Meta, State0, State2, Effects1, false),
             {maybe_store_dehydrated_state(RaftIdx, State), ok, Effects};
+        {out_of_sequence, State, Effects} ->
+            {State, not_enqueued, Effects};
         {duplicate, State, Effects} ->
             {State, ok, Effects}
     end.
@@ -1433,23 +1428,13 @@ maybe_store_dehydrated_state(RaftIdx,
 maybe_store_dehydrated_state(_RaftIdx, State) ->
     State.
 
-enqueue_pending(From,
-                #enqueuer{next_seqno = Next,
-                          pending = [{Next, RaftIdx, RawMsg} | Pending]} = Enq0,
-                State0) ->
-            State = enqueue(RaftIdx, RawMsg, State0),
-            Enq = Enq0#enqueuer{next_seqno = Next + 1, pending = Pending},
-            enqueue_pending(From, Enq, State);
-enqueue_pending(From, Enq, #?MODULE{enqueuers = Enqueuers0} = State) ->
-    State#?MODULE{enqueuers = Enqueuers0#{From => Enq}}.
-
 maybe_enqueue(RaftIdx, undefined, undefined, RawMsg, Effects, State0) ->
     % direct enqueue without tracking
     State = enqueue(RaftIdx, RawMsg, State0),
     {ok, State, Effects};
 maybe_enqueue(RaftIdx, From, MsgSeqNo, RawMsg, Effects0,
               #?MODULE{enqueuers = Enqueuers0,
-                       ra_indexes = Indexes0} = State0) ->
+                       ra_indexes = _Indexes0} = State0) ->
 
     case maps:get(From, Enqueuers0, undefined) of
         undefined ->
@@ -1461,22 +1446,14 @@ maybe_enqueue(RaftIdx, From, MsgSeqNo, RawMsg, Effects0,
             % it is the next expected seqno
             State1 = enqueue(RaftIdx, RawMsg, State0),
             Enq = Enq0#enqueuer{next_seqno = MsgSeqNo + 1},
-            State = enqueue_pending(From, Enq, State1),
+            State = State1#?MODULE{enqueuers = Enqueuers0#{From => Enq}},
             {ok, State, Effects0};
-        #enqueuer{next_seqno = Next,
-                  pending = Pending0} = Enq0
+        #enqueuer{next_seqno = Next} = _Enq0
           when MsgSeqNo > Next ->
-            % out of order delivery
-            Pending = [{MsgSeqNo, RaftIdx, RawMsg} | Pending0],
-            Enq = Enq0#enqueuer{pending = lists:sort(Pending)},
-            %% if the enqueue it out of order we need to mark it in the
-            %% index
-            Indexes = rabbit_fifo_index:append(RaftIdx, Indexes0),
-            {ok, State0#?MODULE{enqueuers = Enqueuers0#{From => Enq},
-                                ra_indexes = Indexes}, Effects0};
+            %% TODO: when can this happen?
+            {out_of_sequence, State0, Effects0};
         #enqueuer{next_seqno = Next} when MsgSeqNo =< Next ->
-            % duplicate delivery - remove the raft index from the ra_indexes
-            % map as it was added earlier
+            % duplicate delivery
             {duplicate, State0, Effects0}
     end.
 

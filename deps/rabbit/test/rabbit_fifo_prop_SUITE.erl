@@ -1164,16 +1164,12 @@ messages_total_prop(Conf0, Commands) ->
 messages_total_invariant() ->
     fun(#rabbit_fifo{messages = M,
                      consumers = C,
-                     enqueuers = E,
                      prefix_msgs = {PTot, _, RTot, _},
                      returns = R} = S) ->
             Base = lqueue:len(M) + lqueue:len(R) + PTot + RTot,
-            CTot = maps:fold(fun (_, #consumer{checked_out = Ch}, Acc) ->
+            Tot = maps:fold(fun (_, #consumer{checked_out = Ch}, Acc) ->
                                      Acc + map_size(Ch)
                              end, Base, C),
-            Tot = maps:fold(fun (_, #enqueuer{pending = P}, Acc) ->
-                                    Acc + length(P)
-                            end, CTot, E),
             QTot = rabbit_fifo:query_messages_total(S),
             case Tot == QTot of
                 true -> true;
