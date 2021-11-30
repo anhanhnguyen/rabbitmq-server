@@ -392,35 +392,38 @@ apply(#{index := Index}, #purge{},
       #?MODULE{messages_total = Tot,
                returns = Returns,
                messages = Messages,
-               ra_indexes = Indexes0} = State0) ->
-    Total = messages_ready(State0),
-    Indexes1 = lists:foldl(fun (?INDEX_MSG(I, _), Acc0) when is_integer(I) ->
+               ra_indexes = Indexes0,
+               dlx = DlxState0} = State0) ->
+    NumReady = messages_ready(State0),
+    Indexes1 = lists:foldl(fun (?INDEX_MSG(I, ?MSG(_, _)), Acc0) when is_integer(I) ->
                                    rabbit_fifo_index:delete(I, Acc0);
                                (_, Acc) ->
                                    Acc
                            end, Indexes0, lqueue:to_list(Returns)),
-    %%TODO purge discarded messages
-    % Indexes2 = lists:foldl(fun (?INDEX_MSG(I, _), Acc0) when is_integer(I) ->
-                                   % rabbit_fifo_index:delete(I, Acc0);
-                               % (_, Acc) ->
-                                   % Acc
-                           % end, Indexes1, lqueue:to_list(Discards)),
-    Indexes = lists:foldl(fun (?INDEX_MSG(I, _), Acc0) when is_integer(I) ->
+    Indexes2 = lists:foldl(fun (?INDEX_MSG(I, ?MSG(_, _)), Acc0) when is_integer(I) ->
                                   rabbit_fifo_index:delete(I, Acc0);
                               (_, Acc) ->
                                   Acc
                           end, Indexes1, lqueue:to_list(Messages)),
+    {DlxState, DiscardMsgs} = rabbit_fifo_dlx:purge(DlxState0),
+    Indexes = lists:foldl(fun (?INDEX_MSG(I, ?MSG(_, _)), Acc0) when is_integer(I) ->
+                                  rabbit_fifo_index:delete(I, Acc0);
+                              (_, Acc) ->
+                                  Acc
+                          end, Indexes2, DiscardMsgs),
+    NumPurged = NumReady + length(DiscardMsgs),
 
     State1 = State0#?MODULE{ra_indexes = Indexes,
                             messages = lqueue:new(),
-                            messages_total = Tot - Total,
+                            messages_total = Tot - NumPurged,
                             returns = lqueue:new(),
+                            dlx = DlxState,
                             msg_bytes_enqueue = 0,
                             prefix_msgs = {0, [], 0, []},
                             msg_bytes_in_memory = 0,
                             msgs_ready_in_memory = 0},
     Effects0 = [garbage_collection],
-    Reply = {purge, Total},
+    Reply = {purge, NumPurged},
     {State, _, Effects} = evaluate_limit(Index, false, State0,
                                          State1, Effects0),
     update_smallest_raft_index(Index, Reply, State, Effects);

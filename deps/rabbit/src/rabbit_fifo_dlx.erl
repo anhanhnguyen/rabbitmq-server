@@ -10,7 +10,7 @@
 % called by rabbit_fifo delegating DLX handling to this module
 -export([init/0, apply/2, discard/3, overview/1,
          checkout/1, state_enter/4,
-         start_worker/2, terminate_worker/1, cleanup/1,
+         start_worker/2, terminate_worker/1, cleanup/1, purge/1,
          consumer_pid/1, dehydrate/1, normalize/1]).
 
 %% This module handles the dead letter (DLX) part of the rabbit_fifo state machine.
@@ -265,6 +265,28 @@ cleanup(#?MODULE{consumer = Consumer,
                         end,
     DiscardReasonMsgs = lqueue:to_list(Discards),
     CheckedReasonMsgs ++ DiscardReasonMsgs.
+
+purge(#?MODULE{consumer = Con0,
+               discards = Discards} = State0) ->
+    {Con, CheckedMsgs} = case Con0 of
+                             #dlx_consumer{checked_out = Checked} when is_map(Checked) ->
+                                 L = maps:to_list(Checked),
+                                 {_, CheckedReasonMsgs} = lists:unzip(L),
+                                 {_, Msgs} = lists:unzip(CheckedReasonMsgs),
+                                 C = Con0#dlx_consumer{checked_out = #{}},
+                                 {C, Msgs};
+                             _ ->
+                                 {Con0, []}
+                         end,
+    DiscardReasonMsgs = lqueue:to_list(Discards),
+    {_, DiscardMsgs} = lists:unzip(DiscardReasonMsgs),
+    PurgedMsgs = CheckedMsgs ++ DiscardMsgs,
+    State = State0#?MODULE{consumer = Con,
+                           discards = lqueue:new(),
+                           msg_bytes = 0,
+                           msg_bytes_checkout = 0
+                          },
+    {State, PurgedMsgs}.
 
 %% TODO Consider alternative to not dehydrate at all
 %% by putting messages to disk before enqueueing them in discards queue.
