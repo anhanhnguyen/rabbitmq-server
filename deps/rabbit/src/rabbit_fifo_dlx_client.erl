@@ -13,13 +13,6 @@
 
 checkout(RegName, QResource, Leader, NumUnsettled) ->
     Cmd = rabbit_fifo_dlx:make_checkout(RegName, NumUnsettled),
-    %% TODO
-    %% A message being discarded and thereafter acked has to be persisted in the Raft log.
-    %% However, DLX worker subscription doesn't necessarily have to be persisted in the Raft log, does it?
-    %% For normal consumers it makes sense because the new leader needs resume delivering messages
-    %% where the old leader left off. So it needs to know the various consumer sates.
-    %% But the new leader will simply re-publish all unacked discarded messages to the new DLX worker, no need
-    %% to keep the old DLX worker state around?
     State = #state{queue_resource = QResource,
                    leader = Leader,
                    last_msg_id = -1},

@@ -6,7 +6,6 @@
 %% is less than the reason atom.
 -type reason() :: 'expired' | 'rejected' | delivery_limit | ?NIL.
 
-%%TODO Add logic to rabbit_fifo_dlx to dehydrate the state.
 % See snapshot scenarios in rabbit_fifo_prop_SUITE. Add dlx dehydrate tests.
 -record(dlx_consumer,{
           %% We don't require a consumer tag because a consumer tag is a means to distinguish

@@ -266,6 +266,8 @@ cleanup(#?MODULE{consumer = Consumer,
     DiscardReasonMsgs = lqueue:to_list(Discards),
     CheckedReasonMsgs ++ DiscardReasonMsgs.
 
+%% TODO Consider alternative to not dehydrate at all
+%% by putting messages to disk before enqueueing them in discards queue.
 dehydrate(#?MODULE{discards = Discards,
                    consumer = Con} = State) ->
     State#?MODULE{discards = dehydrate_messages(Discards),

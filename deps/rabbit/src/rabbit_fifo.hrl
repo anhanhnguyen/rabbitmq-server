@@ -2,17 +2,21 @@
 %% macros for memory optimised tuple structures
 -define(TUPLE(A, B), [A | B]).
 
--define(DISK_MSG_TAG, '$disk').
-% -define(PREFIX_DISK_MSG_TAG, '$prefix_disk').
-%%TODO shorten that atom since it gets persisted many times
--define(PREFIX_MEM_MSG_TAG, '$prefix_inmem').
+%% We want short atoms since their binary representations will get
+%% persisted in a snapshot for every message.
+%% '$d' stand for 'disk'.
+-define(DISK_MSG_TAG, '$d').
+%% '$m' stand for 'memory'.
+-define(PREFIX_MEM_MSG_TAG, '$m').
 
 -define(DISK_MSG(Header), [Header | ?DISK_MSG_TAG]).
 -define(MSG(Header, RawMsg), [Header | RawMsg]).
 -define(INDEX_MSG(Index, Msg), [Index | Msg]).
+-define(PREFIX_MEM_MSG(Header), [Header | ?PREFIX_MEM_MSG_TAG]).
+
+% -define(PREFIX_DISK_MSG_TAG, '$prefix_disk').
 % -define(PREFIX_DISK_MSG(Header), [?PREFIX_DISK_MSG_TAG | Header]).
 % -define(PREFIX_DISK_MSG(Header), ?DISK_MSG(Header)).
--define(PREFIX_MEM_MSG(Header), [?PREFIX_MEM_MSG_TAG | Header]).
 
 -type option(T) :: undefined | T.
 
@@ -182,6 +186,14 @@
          % index when there are large gaps but should be faster than gb_trees
          % for normal appending operations as it's backed by a map
          ra_indexes = rabbit_fifo_index:empty() :: rabbit_fifo_index:state(),
+         %% A release cursor is essentially a snapshot without message bodies
+         %% (aka. "dehydrated state") taken at time T in order to truncate
+         %% the log at some point in the future when all messages that were enqueued
+         %% up to time T have been removed (e.g. consumed, dead-lettered, or dropped).
+         %% This concept enables snapshots to not contain any message bodies.
+         %% Advantage: Smaller snapshots are sent between Ra nodes.
+         %% Working assumption: Messages are consumed in a FIFO-ish order because
+         %% the log is truncated only until the oldest message.
          release_cursors = lqueue:new() :: lqueue:lqueue({release_cursor,
                                                           ra:index(), #rabbit_fifo{}}),
          % consumers need to reflect consumer state at time of snapshot
@@ -199,6 +211,8 @@
          %% overflow calculations).
          %% This is done so that consumers are still served in a deterministic
          %% order on recovery.
+         %% TODO Remove this field and store prefix messages in-place. This will
+         %% simplify the checkout logic.
          prefix_msgs = {0, [], 0, []} :: prefix_msgs(),
          dlx = rabbit_fifo_dlx:init() :: rabbit_fifo_dlx:state(),
          msg_bytes_enqueue = 0 :: non_neg_integer(),

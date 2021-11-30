@@ -111,7 +111,8 @@ handle_continue({QRef, RegName}, undefined) ->
                           queue_type_state = rabbit_queue_type:init()}}.
 
 terminate(_Reason, _State) ->
-    %% cancel subscription?
+    %%TODO cancel subscription?
+    %%TODO cancel timer?
     ok.
 
 handle_call(Request, From, State) ->
@@ -345,6 +346,9 @@ maybe_ack(#state{pendings = Pendings0,
             end
     end.
 
+%% TODO do not only redeliver once timer fires, but also on
+%% 1. policy update, and on
+%% 2. received monitor UP message from target queue
 redeliver_timed_out_messsages(#state{pendings = Pendings} = State) ->
     case lookup_dlx(State) of
         not_found ->

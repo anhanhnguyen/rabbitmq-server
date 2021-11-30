@@ -2065,6 +2065,8 @@ checkout_one(#{system_time := Ts} = Meta, InitState0, Effects0) ->
                                         true ->
                                             add_bytes_checkout(Header, State1);
                                         false ->
+                                            %% TODO do not subtract from memory here since
+                                            %% messages are still in memory when checked out
                                             subtract_in_memory_counts(
                                               Header, add_bytes_checkout(Header, State1))
                                     end,
@@ -2258,17 +2260,17 @@ maybe_queue_consumer(ConsumerId, #consumer{credit = Credit} = Con,
 
 %% creates a dehydrated version of the current state to be cached and
 %% potentially used to for a snaphot at a later point
-% dehydrate_state(#?MODULE{msg_bytes_in_memory = 0,
-                         % cfg = #cfg{max_length = 0},
-                         % consumers = Consumers} = State) ->
-    %% no messages are kept in memory, no need to
-    %% overly mutate the current state apart from removing indexes and cursors
-    % State#?MODULE{
-                  % ra_indexes = rabbit_fifo_index:empty(),
-                  % consumers = maps:map(fun (_, C) ->
-                                               % dehydrate_consumer(C)
-                                       % end, Consumers),
-                  % release_cursors = lqueue:new()};
+dehydrate_state(#?MODULE{msg_bytes_in_memory = 0,
+                         cfg = #cfg{max_in_memory_length = 0},
+                         consumers = Consumers} = State) ->
+    % no messages are kept in memory, no need to
+    % overly mutate the current state apart from removing indexes and cursors
+    State#?MODULE{
+             ra_indexes = rabbit_fifo_index:empty(),
+             consumers = maps:map(fun (_, C) ->
+                                          dehydrate_consumer(C)
+                                  end, Consumers),
+             release_cursors = lqueue:new()};
 dehydrate_state(#?MODULE{messages = Messages,
                          consumers = Consumers,
                          returns = Returns,
