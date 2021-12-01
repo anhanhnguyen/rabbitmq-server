@@ -120,8 +120,9 @@ handle_call(Request, From, State) ->
     {noreply, State}.
 
 handle_cast({queue_event, QRef, {_From, {machine, lookup_topology}}},
-            #state{queue_ref = QRef} = State) ->
-    {noreply, lookup_topology(State)};
+            #state{queue_ref = QRef} = State0) ->
+    State = lookup_topology(State0),
+    redeliver_and_ack(State);
 handle_cast({queue_event, QRef, {From, Evt}},
             #state{queue_ref = QRef,
                    dlx_client_state = DlxState0} = State0) ->
@@ -147,15 +148,18 @@ handle_cast({queue_event, QRef, Evt},
             {noreply, State0}
     end;
 handle_cast(settle_timeout, State0) ->
-    State1 = State0#state{timer = undefined},
-    State2 = redeliver_timed_out_messsages(State1),
-    %% Routes could have been changed dynamically.
-    %% If a publisher confirm timed out for a target queue to which we now don't route anymore, ack the message.
-    State3 = maybe_ack(State2),
-    State4 = maybe_set_timer(State3),
-    {noreply, State4};
+    State = State0#state{timer = undefined},
+    redeliver_and_ack(State);
 handle_cast(Request, State) ->
     rabbit_log:warning("~s received unhandled cast ~p", [?MODULE, Request]),
+    {noreply, State}.
+
+redeliver_and_ack(State0) ->
+    State1 = redeliver_messsages(State0),
+    %% Routes could have been changed dynamically.
+    %% If a publisher confirm timed out for a target queue to which we now don't route anymore, ack the message.
+    State2 = maybe_ack(State1),
+    State = maybe_set_timer(State2),
     {noreply, State}.
 
 %%TODO handle monitor messages when target queue goes down (e.g. is deleted)
@@ -346,10 +350,11 @@ maybe_ack(#state{pendings = Pendings0,
             end
     end.
 
-%% TODO do not only redeliver once timer fires, but also on
-%% 1. policy update, and on
-%% 2. received monitor UP message from target queue
-redeliver_timed_out_messsages(#state{pendings = Pendings} = State) ->
+%% TODO Also re-deliver when receiving monitor UP message from target queue
+%%
+%% Re-deliver messages that timed out waiting on publisher confirm and
+%% messages that got never sent due to routing topology misconfiguration.
+redeliver_messsages(#state{pendings = Pendings} = State) ->
     case lookup_dlx(State) of
         not_found ->
             %% Configured dead-letter-exchange does (still) not exist.
@@ -358,15 +363,15 @@ redeliver_timed_out_messsages(#state{pendings = Pendings} = State) ->
             State;
         DLX ->
             Now = os:system_time(millisecond),
-            maps:fold(fun(OutSeq, #pending{last_published_at = LastPub} = Pend, S0) when LastPub + ?SETTLE_TIMEOUT =< Now ->
+            maps:fold(fun(OutSeq, #pending{last_published_at = LastPub} = Pend, S0)
+                            when LastPub + ?SETTLE_TIMEOUT =< Now ->
                               %% Publisher confirm timed out.
                               redeliver(Pend, DLX, OutSeq, S0);
-                         (OutSeq, #pending{last_published_at = undefined,
-                                           consumed_at = ConsumedAt} = Pend, S0) when ConsumedAt + ?SETTLE_TIMEOUT =< Now ->
+                         (OutSeq, #pending{last_published_at = undefined} = Pend, S0) ->
                               %% Message was never published due to dead-letter routing topology misconfiguration.
                               redeliver(Pend, DLX, OutSeq, S0);
                          (_OutSeq, _Pending, S) ->
-                              %% Publisher confirm did not time out (yet).
+                              %% Publisher confirm did not time out.
                               S
                       end, State, Pendings)
     end.
@@ -404,6 +409,8 @@ redeliver(Pend, DLX, OldOutSeq, #state{routing_key = DLRKey} = State) ->
 %% leading to many duplicates in the target queue without ever acking the message back to the source discards queue.
 %%
 %% Therefore, set SETTLE_TIMEOUT reasonably high (e.g. 2 minutes).
+%%
+%% TODO do not log per message?
 redeliver0(#pending{consumed_msg_id = ConsumedMsgId,
                     content = Content,
                     unsettled = Unsettled,
