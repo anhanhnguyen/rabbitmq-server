@@ -175,6 +175,7 @@
          % queue of returned msg_in_ids - when checking out it picks from
          returns = lqueue:new() :: lqueue:lqueue(term()),
          % a counter of enqueues - used to trigger shadow copy points
+         % reset to 0 when release_cursor gets stored
          enqueue_count = 0 :: non_neg_integer(),
          % a map containing all the live processes that have ever enqueued
          % a message to this queue as well as a cached value of the smallest

@@ -1468,6 +1468,13 @@ maybe_set_msg_ttl(#basic_message{content = Content},
     case min(PerMsgMsgTTL, PerQueueMsgTTL) of
         undefined ->
             Header;
+        0 ->
+            %% We do not comply exactly with the "TTL=0 models AMQP immediate flag" semantics
+            %% as done for classic queues where the message is discarded if it cannot be
+            %% consumed immediately.
+            %% Instead, we discard the message if it cannot be consumed within the same millisecond
+            %% when it got enqueued. This behaviour should be good enough.
+            update_header(expiry, fun(Ts) -> Ts end, RaCmdTs + 1, Header);
         TTL ->
             update_header(expiry, fun(Ts) -> Ts end, RaCmdTs + TTL, Header)
     end.
@@ -2094,17 +2101,11 @@ checkout_one(#{system_time := Ts} = Meta, InitState0, Effects0) ->
             end
     end.
 
-%% remove all expired messages from head of queue
+%% dequeue all expired messages
 expire_msgs(RaCmdTs, State0, Effects0) ->
     case take_next_msg(State0) of
         {?INDEX_MSG(Idx, ?MSG(#{expiry := Expiry} = Header, _) = Msg) = FullMsg, State1}
-          when RaCmdTs > Expiry ->
-            %% We use ">" rathern than ">=" because we do not want to treat a message TTL of 0 as special case.
-            %% If TTL was set to 0 and the message will not be checked out to any consumer, it will expire the next millisecond
-            %% or whenever the next checkout/4,5 runs. If the next checkout runs within the same
-            %% millisecond, we do not comply exaclty with the "TTL=0 models AMQP immediate flag" semantics as done for classic
-            %% queues where the message is discarded if it cannot be consumed immediately. This behaviour should be good enough
-            %% for all use cases.
+          when RaCmdTs >= Expiry ->
             #?MODULE{dlx = DlxState0,
                      cfg = #cfg{dead_letter_handler = DLH},
                      ra_indexes = Indexes0} = State2 = add_bytes_drop(Header, State1),
@@ -2128,11 +2129,11 @@ expire_msgs(RaCmdTs, State0, Effects0) ->
                     expire_msgs(RaCmdTs, State, Effects)
             end;
         {?PREFIX_MEM_MSG(#{expiry := Expiry} = Header) = Msg, State1}
-          when RaCmdTs > Expiry ->
+          when RaCmdTs >= Expiry ->
             State2 = expire_prefix_msg(Msg, Header, State1),
             expire_msgs(RaCmdTs, State2, Effects0);
         {?DISK_MSG(#{expiry := Expiry} = Header) = Msg, State1}
-          when RaCmdTs > Expiry ->
+          when RaCmdTs >= Expiry ->
             State2 = expire_prefix_msg(Msg, Header, State1),
             expire_msgs(RaCmdTs, State2, Effects0);
         _ ->
