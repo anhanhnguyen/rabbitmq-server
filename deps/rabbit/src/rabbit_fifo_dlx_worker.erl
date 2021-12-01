@@ -162,9 +162,18 @@ redeliver_and_ack(State0) ->
     State = maybe_set_timer(State2),
     {noreply, State}.
 
-%%TODO handle monitor messages when target queue goes down (e.g. is deleted)
-%% {'DOWN', #Ref<0.1329999082.3399994753.45999>,process,<0.2626.0>,normal}
-%% and remove it from the queue_type_state
+handle_info({'DOWN', _MRef, process, QPid, Reason},
+            #state{queue_type_state = QTypeState0} = State0) ->
+    %% received from target classic queue
+    State = case rabbit_queue_type:handle_down(QPid, Reason, QTypeState0) of
+                {ok, QTypeState, Actions} ->
+                    State1 = State0#state{queue_type_state = QTypeState},
+                    handle_queue_actions(Actions, State1);
+                {eol, QTypeState1, QRef} ->
+                    QTypeState = rabbit_queue_type:remove(QRef, QTypeState1),
+                    State0#state{queue_type_state = QTypeState}
+            end,
+    {noreply, State};
 handle_info(Info, State) ->
     rabbit_log:warning("~s received unhandled info ~p", [?MODULE, Info]),
     {noreply, State}.
@@ -190,8 +199,12 @@ handle_queue_actions(Actions, State0) ->
               S1 = handle_settled(QRef, MsgSeqs, S0),
               S2 = maybe_ack(S1),
               maybe_cancel_timer(S2);
-          ({rejected, _QRef, _MsgSeqNos}, S0) ->
-              rabbit_log:error("queue action rejected not yet implemented", []),
+          ({rejected, QRef, MsgSeqNos}, S0) ->
+              rabbit_log:debug("Ignoring rejected messages ~p from ~s", [MsgSeqNos, rabbit_misc:rs(QRef)]),
+              S0;
+          ({queue_down, QRef}, S0) ->
+              %% target classic queue is down, but not deleted
+              rabbit_log:debug("Ignoring DOWN from ~s", [rabbit_misc:rs(QRef)]),
               S0
       end, State0, Actions).
 
@@ -350,8 +363,6 @@ maybe_ack(#state{pendings = Pendings0,
             end
     end.
 
-%% TODO Also re-deliver when receiving monitor UP message from target queue
-%%
 %% Re-deliver messages that timed out waiting on publisher confirm and
 %% messages that got never sent due to routing topology misconfiguration.
 redeliver_messsages(#state{pendings = Pendings} = State) ->

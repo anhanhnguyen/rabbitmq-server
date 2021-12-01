@@ -18,6 +18,7 @@ start_link() ->
 
 init([]) ->
     FeatureFlag = quorum_queue,
+    %%TODO rabbit_feature_flags:is_enabled(FeatureFlag) ?
     case rabbit_ff_registry:is_enabled(FeatureFlag) of
         true ->
             SupFlags = #{strategy => simple_one_for_one,
