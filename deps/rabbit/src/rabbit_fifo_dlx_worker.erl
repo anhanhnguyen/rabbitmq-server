@@ -63,8 +63,8 @@
 
 -record(state, {
           registered_name :: atom(),
-          %% In this version of the module, we have one rabbit_fifo_dlx_worker per source quorum queue
-          %% (if x-dead-letter-strategy at-least-once is used).
+          %% There is one rabbit_fifo_dlx_worker per source quorum queue
+          %% (if dead-letter-strategy at-least-once is used).
           queue_ref :: rabbit_amqqueue:name(),
           %% configured (x-)dead-letter-exchange of source queue
           exchange_ref,
@@ -170,8 +170,8 @@ code_change(_OldVsn, State, _Extra) ->
 
 lookup_topology(#state{queue_ref = {resource, Vhost, queue, _} = QRef} = State) ->
     {ok, Q} = rabbit_amqqueue:lookup(QRef),
-    DLRKey = rabbit_queue_type_util:args_policy_lookup(<<"dead-letter-routing-key">>, fun(Pol, _QArg) -> Pol end, Q),
-    DLX = rabbit_queue_type_util:args_policy_lookup(<<"dead-letter-exchange">>, fun(Pol, _QArg) -> Pol end, Q),
+    DLRKey = rabbit_queue_type_util:args_policy_lookup(<<"dead-letter-routing-key">>, fun(_Pol, QArg) -> QArg end, Q),
+    DLX = rabbit_queue_type_util:args_policy_lookup(<<"dead-letter-exchange">>, fun(_Pol, QArg) -> QArg end, Q),
     DLXRef = rabbit_misc:r(Vhost, exchange, DLX),
     State#state{exchange_ref = DLXRef,
                 routing_key = DLRKey}.

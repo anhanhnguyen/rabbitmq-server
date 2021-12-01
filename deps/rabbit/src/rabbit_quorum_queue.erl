@@ -253,6 +253,8 @@ ra_machine_config(Q) when ?is_amqqueue(Q) ->
 
 policyHasPrecedence(Policy, _QueueArg) ->
     Policy.
+queueArgHasPrecedence(_Policy, QueueArg) ->
+    QueueArg.
 
 single_active_consumer_on(Q) ->
     QArguments = amqqueue:get_arguments(Q),
@@ -1244,12 +1246,12 @@ reclaim_memory(Vhost, QueueName) ->
 
 %%----------------------------------------------------------------------------
 dead_letter_handler(Q, Overflow) ->
-    %%TODO policy having precedence is a behaviour change. Check if that's okay.
-    %% Policy needs to have precedence for at-least-once to allow to dynamically
-    %% fix dead-letter routing topologies for a queue.
-    %% A: Do not change precedence.
-    Exchange = args_policy_lookup(<<"dead-letter-exchange">>, fun policyHasPrecedence/2, Q),
-    RoutingKey = args_policy_lookup(<<"dead-letter-routing-key">>, fun policyHasPrecedence/2, Q),
+    %% Queue arg continues to take precedence to not break existing configurations
+    %% for queues upgraded from <v3.10 to >=v3.10
+    Exchange = args_policy_lookup(<<"dead-letter-exchange">>, fun queueArgHasPrecedence/2, Q),
+    RoutingKey = args_policy_lookup(<<"dead-letter-routing-key">>, fun queueArgHasPrecedence/2, Q),
+    %% Policy takes precedence because it's a new key introduced in v3.10 and we want
+    %% users to use policies instead of queue args allowing dynamic reconfiguration.
     Strategy = args_policy_lookup(<<"dead-letter-strategy">>, fun policyHasPrecedence/2, Q),
     QName = amqqueue:get_name(Q),
     dlh(Exchange, RoutingKey, Strategy, Overflow, QName).
