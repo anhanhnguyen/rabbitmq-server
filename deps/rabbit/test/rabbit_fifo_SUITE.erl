@@ -527,6 +527,31 @@ down_with_noconnection_returns_unack_test(C) ->
                         maps:get(Cid, State2a#rabbit_fifo.consumers)),
     ok.
 
+down_with_noconnection_returns_unack_order_test(C) ->
+    Cid = {<<"down_with_noconnection_returns_unack_order_test">>, self()},
+    NumMsgs = 5,
+    
+    S0 = init(#{name => ?FUNCTION_NAME,
+                max_in_memory_length => 0,
+                queue_resource => rabbit_misc:r("/", queue,
+                                           atom_to_binary(?FUNCTION_NAME, utf8)),
+                release_cursor_interval => 0,
+                delivery_limit => 10}),
+    S1 = lists:foldl(fun (Num, FS0) ->
+            {FS, _} = enq(C, Num, Num, Num, FS0),
+            FS
+        end, S0, lists:seq(1, NumMsgs)),
+    {S2, _} = check(C, Cid, 1, 3, S1),
+    {S3, _, _} = apply(meta(C, 2), {down, self(), noconnection}, S2),
+    Returns1 = lqueue:to_list(S3#rabbit_fifo.returns),
+    ct:pal("Returns1: ~p", [Returns1]),
+    {S4, _} = check(C, Cid, 1, 1, S3),
+    {S5, _, _} = apply(meta(C, 2), {down, self(), noconnection}, S4),
+    Returns2 = lqueue:to_list(S5#rabbit_fifo.returns),
+    ct:pal("Returns2: ~p", [Returns2]),
+    ?assertEqual(Returns1, Returns2),
+    ok.
+
 down_with_noproc_enqueuer_is_cleaned_up_test(C) ->
     State00 = test_init(test),
     Pid = spawn(fun() -> ok end),
