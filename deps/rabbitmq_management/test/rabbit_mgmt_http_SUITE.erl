@@ -93,6 +93,7 @@ all_tests() -> [
     permissions_administrator_test,
     permissions_vhost_test,
     permissions_amqp_test,
+    permissions_queue_delete_test,
     permissions_connection_channel_consumer_test,
     consumers_cq_test,
     consumers_qq_test,
@@ -1415,6 +1416,18 @@ permissions_amqp_test(Config) ->
              ?NOT_AUTHORISED),
     http_put(Config, "/queues/%2F/bar-queue", QArgs, "nonexistent", "nonexistent",
              ?NOT_AUTHORISED),
+    http_delete(Config, "/users/myuser", {group, '2xx'}),
+    passed.
+
+permissions_queue_delete_test(Config) ->
+    QArgs = #{},
+    PermArgs = [{configure, <<"foo.*">>}, {write, <<".*">>}, {read, <<".*">>}],
+    http_put(Config, "/users/myuser", [{password, <<"myuser">>},
+                                       {tags, <<"management">>}], {group, '2xx'}),
+    http_put(Config, "/permissions/%2F/myuser", PermArgs, {group, '2xx'}),
+    http_put(Config, "/queues/%2F/bar-queue", QArgs, {group, '2xx'}),
+    http_delete(Config, "/queues/%2F/bar-queue", "myuser", "myuser", ?NOT_AUTHORISED),
+    http_delete(Config, "/queues/%2F/bar-queue", {group, '2xx'}),
     http_delete(Config, "/users/myuser", {group, '2xx'}),
     passed.
 
