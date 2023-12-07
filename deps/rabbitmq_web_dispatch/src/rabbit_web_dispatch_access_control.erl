@@ -218,8 +218,7 @@ is_authorized_vhost_and_has_resource_permission(ReqData, Context, Resource, Perm
                   <<"User not authorised to access this resource">>,
                   fun(User) ->
                       try
-                          AuthzData = get_authz_data_as_map(ReqData),
-                          ok =:= rabbit_access_control:check_resource_access(User, Resource, Permission, AuthzData)
+                          ok =:= rabbit_access_control:check_resource_access(User, Resource, Permission, #{})
                       catch
                           exit:Err:_Stacktrace ->
                               #amqp_error{explanation = Msg} = Err,
