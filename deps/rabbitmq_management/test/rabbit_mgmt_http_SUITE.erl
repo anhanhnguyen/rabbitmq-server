@@ -62,6 +62,7 @@ all_tests() -> [
     vhosts_test,
     vhosts_description_test,
     vhosts_trace_test,
+    large_vhosts_delete_test,
     users_test,
     users_legacy_administrator_test,
     adding_a_user_with_password_test,
@@ -507,6 +508,29 @@ vhosts_trace_test(Config) ->
     http_put(Config, "/vhosts/myvhost", [{tracing, false}], {group, '2xx'}),
     assert_item(Disabled, http_get(Config, "/vhosts/myvhost")),
     http_delete(Config, "/vhosts/myvhost", {group, '2xx'}),
+
+    passed.
+
+large_vhosts_delete_test(Config) ->
+    http_put(Config, "/vhosts/myvhost", none, {group, '2xx'}),
+
+    {ok, Conn} =
+        amqp_connection:start(#amqp_params_direct{node =
+                                                      rabbit_ct_broker_helpers:get_node_config(Config,
+                                                                                               0,
+                                                                                               nodename),
+                                                  virtual_host = <<"myvhost">>}),
+    {ok, Ch} = amqp_connection:open_channel(Conn),
+    [amqp_channel:cast(Ch, #'queue.declare'{queue = integer_to_binary(Q), durable = true})
+     || Q <- lists:seq(0, 10000)],
+    amqp_channel:close(Ch),
+    close_connection(Conn),
+
+    http_delete(Config, "/vhosts/myvhost", ?ACCEPTED),
+
+    timer:sleep(5000),
+    http_put(Config, "/vhosts/myvhost", none, {group, '2xx'}),
+    http_get(Config, "/aliveness-test/myvhost", ?OK),
 
     passed.
 

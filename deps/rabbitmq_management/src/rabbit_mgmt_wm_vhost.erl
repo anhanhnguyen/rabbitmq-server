@@ -10,7 +10,7 @@
 -export([init/2, resource_exists/2, to_json/2,
          content_types_provided/2, content_types_accepted/2,
          is_authorized/2, allowed_methods/2, accept_content/2,
-         delete_resource/2, id/1]).
+         delete_resource/2, delete_completed/2, id/1]).
 -export([variances/2]).
 
 -import(rabbit_misc, [pget/2]).
@@ -19,6 +19,8 @@
 -include_lib("rabbit_common/include/rabbit.hrl").
 
 -dialyzer({nowarn_function, accept_content/2}).
+
+-define(WAIT_FOR_VHOST_DELETION, 15000).
 
 %%--------------------------------------------------------------------
 
@@ -89,11 +91,15 @@ accept_content(ReqData0, Context = #context{user = #user{username = Username}}) 
 delete_resource(ReqData, Context = #context{user = #user{username = Username}}) ->
     VHost = id(ReqData),
     try
-        rabbit_vhost:delete(VHost, Username)
+        Key = rpc:async_call(node(), rabbit_vhost, delete, [VHost, Username]),
+        rpc:nb_yield(Key, ?WAIT_FOR_VHOST_DELETION)
     catch _:{error, {no_such_vhost, _}} ->
         ok
     end,
     {true, ReqData, Context}.
+
+delete_completed(ReqData, Context) ->
+    {rabbit_vhost:exists(id(ReqData)), ReqData, Context}.
 
 is_authorized(ReqData, Context) ->
     rabbit_mgmt_util:is_authorized_admin(ReqData, Context).
