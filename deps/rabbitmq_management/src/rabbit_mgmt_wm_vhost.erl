@@ -90,11 +90,22 @@ accept_content(ReqData0, Context = #context{user = #user{username = Username}}) 
 
 delete_resource(ReqData, Context = #context{user = #user{username = Username}}) ->
     VHost = id(ReqData),
+    Self = self(),
     try
-        Key = rpc:async_call(node(), rabbit_vhost, delete, [VHost, Username]),
-        rpc:nb_yield(Key, ?WAIT_FOR_VHOST_DELETION)
-    catch _:{error, {no_such_vhost, _}} ->
-        ok
+        ok =
+            worker_pool:submit_async(fun() ->
+                                        rabbit_vhost:delete(VHost, Username),
+                                        Self ! finish
+                                     end),
+        receive
+            finish ->
+                ok
+        after ?WAIT_FOR_VHOST_DELETION ->
+            ok
+        end
+    catch
+        _:{error, {no_such_vhost, _}} ->
+            ok
     end,
     {true, ReqData, Context}.
 

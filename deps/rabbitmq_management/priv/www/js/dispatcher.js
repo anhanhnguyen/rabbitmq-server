@@ -178,7 +178,11 @@ dispatcher_add(function(sammy) {
             return false;
         });
       sammy.del('#/vhosts', function() {
-            if (sync_delete(this, '/vhosts/:name')) {
+        var result = sync_delete(this, '/vhosts/:name');
+            if (result) {
+                if (result.http_status == 202) {
+                    show_popup('warn', 'Virtual host deletion is in progress');
+                }
                 update_vhosts();
                 go_to('#/vhosts');
             }
