@@ -1067,6 +1067,13 @@ credential_validator.regexp = ^abc\\d+",
      ]}],
    []},
 
+  {quorum_cluster_size,
+   "quorum_queue.cluster_size = 3",
+   [{rabbit, [
+      {quorum_cluster_size, 3}
+     ]}],
+   []},
+
   %%
   %% Runtime parameters
   %%
